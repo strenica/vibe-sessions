@@ -338,6 +338,33 @@ class VibeSessionsTest(unittest.TestCase):
         self.assertLess(out.index("Old archived thing"), out.index("Scrape the catalogue"))
 
 
+    # -- robustness -------------------------------------------------------- #
+
+    def test_resume_without_vibe_reports_cleanly(self) -> None:
+        """A missing `vibe` binary must not surface as a traceback."""
+        env = dict(
+            os.environ,
+            VIBE_HOME=str(self.home),
+            XDG_STATE_HOME=str(self.home / "state"),
+            PATH="/nonexistent",
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input="1\n",
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.workdir),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not on PATH", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_version_flag(self) -> None:
+        result = self.run_tool("--version")
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout.strip(), r"^vibe-sessions \d+\.\d+\.\d+$")
+
     # -- delete leftovers -------------------------------------------------- #
 
     def test_delete_removes_per_session_plugin_data(self) -> None:

@@ -27,6 +27,8 @@ from pathlib import Path
 # store discovery
 # --------------------------------------------------------------------------- #
 
+__version__ = "1.0.0"
+
 STORE_FORMAT = "mistral.vibe.unified-session-store"
 
 
@@ -480,9 +482,16 @@ def resume(session: dict, *, change_dir: bool, print_only: bool, exec_shell: boo
     elif change_dir and directory:
         print(f"vibe-sessions: {directory} no longer exists, staying in {os.getcwd()}", file=sys.stderr)
 
-    if exec_shell:
-        os.execvp(command[0], command)
-    return subprocess.call(command)
+    try:
+        if exec_shell:
+            os.execvp(command[0], command)
+        return subprocess.call(command)
+    except FileNotFoundError:
+        print(
+            "vibe-sessions: `vibe` is not on PATH, so the session cannot be resumed",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def clear_screen() -> None:
@@ -1043,6 +1052,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  vibe-sessions --json | jq     script it\n"
         ),
     )
+    parser.add_argument("--version", action="version", version=f"vibe-sessions {__version__}")
     parser.add_argument("-l", "--list", action="store_true", help="print a table instead of opening the picker")
     parser.add_argument("-j", "--json", action="store_true", help="print JSON instead of opening the picker")
     parser.add_argument("-a", "--all", action="store_true", help="include archived sessions")
