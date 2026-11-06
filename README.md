@@ -63,6 +63,7 @@ vibe-sessions --delete ID     delete a session (asks first)
 vibe-sessions --rename ID     rename a session
 vibe-sessions --tag ID        tag a session
 vibe-sessions --sort MODE     status | recent | title | folder
+vibe-sessions --prune-config  drop config.toml allowlist entries for dead sessions
 ```
 
 Resuming changes into the session's original folder first, so the agent gets the right project context. `--no-cd` keeps you where you are, `--print` shows the command instead of running it, and `--exec` replaces the shell process instead of running Vibe as a child.
@@ -133,7 +134,16 @@ Asks for confirmation in a box that defaults to **No**, then removes the session
 └───────────────────────────────────────────────────────────┘
 ```
 
-Deleting removes the session directory plus the lock file and `continue-pointers` entry that reference it. It never touches the folder the session ran in. A session a live Vibe process still holds open is refused — close it first.
+Deleting removes the session directory, its lock file, the `continue-pointers` entry that references it, and its `plugins/data/<id>` directory. It never touches the folder the session ran in. A session a live Vibe process still holds open is refused — close it first.
+
+One thing delete deliberately leaves alone: Vibe writes auto-approved paths into `config.toml` as `vibe-path:exact:.../unified/<id>` entries, and those outlive the session. They grant nothing once the directory is gone, but they accumulate. Clean them up explicitly, since `config.toml` is your file and not the tool's:
+
+```bash
+vibe-sessions --prune-config --dry-run   # show what would go
+vibe-sessions --prune-config             # remove, with a backup
+```
+
+It only ever removes lines naming a session directory that no longer exists, and writes `config.toml.bak.vibe-sessions` first.
 
 ```bash
 vibe-sessions --delete <id>          # asks first
@@ -170,4 +180,5 @@ The suite builds a synthetic session store in a temp directory and exercises lis
 
 - Python 3.11+ (uses `tomllib` when available; falls back cleanly on older versions).
 - `fzf` is optional — without it you get a numbered menu.
-- Read-only apart from `--delete` (removes a session directory and its bookkeeping after confirmation) and `--rename` (rewrites one field in `meta.json`).
+- Read-only apart from `--delete` (removes a session directory and its bookkeeping after confirmation), `--rename` (rewrites one field in `meta.json`), and `--prune-config` (removes stale allowlist lines from `config.toml`, with a backup).
+- MIT licensed.

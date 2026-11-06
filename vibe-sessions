@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -597,6 +598,55 @@ def delete_session(session: dict) -> None:
             except OSError:
                 continue
 
+    # Per-session plugin state, keyed by session id.
+    plugin_data = session_root() / "plugins" / "data" / session["id"]
+    if plugin_data.is_dir():
+        shutil.rmtree(plugin_data, ignore_errors=True)
+
+
+ALLOWLIST_ENTRY = re.compile(
+    r'^\s*"vibe-path:exact:(?P<path>[^"]*/unified/(?P<sid>[0-9a-f-]{36})[^"]*)"\s*,?\s*$'
+)
+
+
+def cmd_prune_config(dry_run: bool) -> int:
+    """Drop allowlist entries that point at sessions which no longer exist.
+
+    Deleting a session leaves its auto-approved paths behind in config.toml.
+    They grant nothing once the directory is gone, but they accumulate. This
+    only ever removes lines that name a session directory that is missing.
+    """
+    config = vibe_home() / "config.toml"
+    if not config.is_file():
+        print("no config.toml to prune", file=sys.stderr)
+        return 0
+
+    lines = config.read_text().splitlines(keepends=True)
+    stale: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = ALLOWLIST_ENTRY.match(line)
+        if not match:
+            continue
+        if not (session_root() / "unified" / match.group("sid")).is_dir():
+            stale.append((index, line.strip()))
+
+    if not stale:
+        print("no stale allowlist entries")
+        return 0
+
+    for _, entry in stale:
+        print(("would remove: " if dry_run else "removed: ") + entry)
+    if dry_run:
+        print(f"\n{len(stale)} stale entr{'y' if len(stale) == 1 else 'ies'} (dry run)")
+        return 0
+
+    backup = config.with_suffix(".toml.bak.vibe-sessions")
+    shutil.copy2(config, backup)
+    drop = {index for index, _ in stale}
+    config.write_text("".join(line for i, line in enumerate(lines) if i not in drop))
+    print(f"\n{len(stale)} removed; backup at {backup}")
+    return 0
+
 
 def cmd_delete(session: dict, force: bool) -> int:
     title = session["title"] or "(untitled)"
@@ -1011,6 +1061,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", metavar="TEXT", help="the new title for --rename")
     parser.add_argument("--tag", metavar="ID", help="set the tags for a session")
     parser.add_argument("--tags", metavar="LIST", help="comma separated tags for --tag")
+    parser.add_argument("--prune-config", action="store_true",
+                        help="remove config.toml allowlist entries for sessions that no longer exist")
+    parser.add_argument("--dry-run", action="store_true", help="show what --prune-config would remove")
     parser.add_argument("--sort", metavar="MODE", choices=SORT_MODES,
                         help="sort order, remembered: " + ", ".join(SORT_MODES))
     parser.add_argument("--cycle-sort", action="store_true", help=argparse.SUPPRESS)
@@ -1049,6 +1102,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"vibe-sessions: no session {args.delete}", file=sys.stderr)
             return 1
         return cmd_delete(session, force=args.force)
+
+    if args.prune_config:
+        return cmd_prune_config(dry_run=args.dry_run)
 
     if args.cycle_sort:
         print(cycle_sort())

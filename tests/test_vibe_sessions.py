@@ -337,6 +337,65 @@ class VibeSessionsTest(unittest.TestCase):
         out = self.run_tool("--list", "--all", "--no-color").stdout
         self.assertLess(out.index("Old archived thing"), out.index("Scrape the catalogue"))
 
+
+    # -- delete leftovers -------------------------------------------------- #
+
+    def test_delete_removes_per_session_plugin_data(self) -> None:
+        plugin_data = self.home / "logs/session/plugins/data/bbbbbbbb-1111-2222-3333-444444444444/vibe"
+        plugin_data.mkdir(parents=True)
+        (plugin_data / "state.json").write_text("{}")
+
+        result = self.run_tool("--delete", "bbbbbbbb", "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            (self.home / "logs/session/plugins/data/bbbbbbbb-1111-2222-3333-444444444444").exists()
+        )
+
+    # -- prune-config ------------------------------------------------------ #
+
+    def write_config(self, entries: list[str]) -> Path:
+        config = self.home / "config.toml"
+        body = "[tools.bash]\nallowlist = [\n"
+        body += "".join(f'    "{entry}",\n' for entry in entries)
+        body += "]\n"
+        config.write_text(body)
+        return config
+
+    def test_prune_config_removes_only_dead_sessions(self) -> None:
+        live = "vibe-path:exact:/home/prep/.vibe/logs/session/unified/aaaaaaaa-1111-2222-3333-444444444444"
+        dead = "vibe-path:exact:/home/prep/.vibe/logs/session/unified/99999999-1111-2222-3333-444444444444"
+        config = self.write_config([live, dead, "git"])
+
+        result = self.run_tool("--prune-config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        text = config.read_text()
+        self.assertIn("aaaaaaaa-1111-2222-3333-444444444444", text)
+        self.assertNotIn("99999999-1111-2222-3333-444444444444", text)
+        self.assertIn('"git"', text)
+        self.assertTrue((self.home / "config.toml.bak.vibe-sessions").is_file())
+
+    def test_prune_config_dry_run_changes_nothing(self) -> None:
+        dead = "vibe-path:exact:/home/prep/.vibe/logs/session/unified/99999999-1111-2222-3333-444444444444"
+        config = self.write_config([dead])
+        before = config.read_text()
+
+        result = self.run_tool("--prune-config", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would remove", result.stdout)
+        self.assertEqual(config.read_text(), before)
+        self.assertFalse((self.home / "config.toml.bak.vibe-sessions").exists())
+
+    def test_prune_config_with_nothing_stale(self) -> None:
+        live = "vibe-path:exact:/home/prep/.vibe/logs/session/unified/aaaaaaaa-1111-2222-3333-444444444444"
+        config = self.write_config([live])
+        before = config.read_text()
+
+        result = self.run_tool("--prune-config")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no stale", result.stdout)
+        self.assertEqual(config.read_text(), before)
+
     # -- delete ----------------------------------------------------------- #
 
     def test_delete_removes_directory_and_bookkeeping(self) -> None:
