@@ -273,6 +273,12 @@ class VibeSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("running", result.stderr.lower())
 
+    def test_rename_without_a_title_cancels_without_a_tty(self) -> None:
+        """No tty means no input box, so the rename must cancel cleanly."""
+        result = self.run_tool("--rename", "bbbbbbbb")
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("Scrape the catalogue", self.run_tool("--list", "--no-color").stdout)
+
     def test_rename_rejects_empty_title(self) -> None:
         result = self.run_tool("--rename", "bbbbbbbb", "--title", "   ")
         self.assertEqual(result.returncode, 1)

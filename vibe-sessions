@@ -484,17 +484,55 @@ def resume(session: dict, *, change_dir: bool, print_only: bool, exec_shell: boo
     return subprocess.call(command)
 
 
+def has_tty() -> bool:
+    """True when there is a controlling terminal to draw a box on."""
+    try:
+        with open("/dev/tty"):
+            return True
+    except OSError:
+        return False
+
+
 def confirm(prompt: str, title: str = "vibe-sessions") -> bool:
-    """Yes/no box, defaulting to No so a stray Enter never deletes anything."""
-    if shutil.which("whiptail"):
+    """Yes/no box, defaulting to No so a stray Enter never deletes anything.
+
+    fzf is preferred over whiptail: this runs inside fzf's own `execute`, and
+    whiptail does not understand modern key encodings such as CSI-u. It sees
+    the ESC of a Ctrl+Backspace, quits, and the rest of the sequence leaks
+    into the parent fzf as a search query.
+    """
+    if shutil.which("fzf"):
         try:
-            # whiptail: 0 = Yes, 1 = No, anything else = it could not draw.
+            result = subprocess.run(
+                [
+                    "fzf",
+                    "--height=~20%",
+                    "--layout=reverse",
+                    "--no-info",
+                    "--border=rounded",
+                    f"--border-label= {title} ",
+                    "--border-label-pos=3",
+                    "--header", prompt,
+                    "--header-first",
+                    "--pointer=▶",
+                ],
+                input="No\nYes",
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                return False
+            return result.stdout.strip() == "Yes"
+        except OSError:
+            pass
+
+    if shutil.which("whiptail") and has_tty():
+        try:
             code = subprocess.call(
                 ["whiptail", "--title", title, "--yesno", prompt, "14", "74", "--defaultno"],
                 stderr=subprocess.DEVNULL,
             )
-            if code in (0, 1):
-                return code == 0
+            return code == 0
         except OSError:
             pass
     try:
@@ -612,15 +650,46 @@ def whiptail(args: list[str]) -> tuple[int, str]:
 
 
 def ask(prompt: str, title: str, default: str = "") -> str | None:
-    """Single-line input box. Returns None when cancelled."""
-    if shutil.which("whiptail"):
+    """Single-line input box. Returns None when cancelled.
+
+    fzf's --print-query gives a text field that understands every key encoding,
+    which whiptail nested inside fzf does not (see confirm()).
+    """
+    if shutil.which("fzf"):
+        try:
+            result = subprocess.run(
+                [
+                    "fzf",
+                    "--print-query",
+                    "--height=~20%",
+                    "--layout=reverse",
+                    "--no-info",
+                    "--border=rounded",
+                    f"--border-label= {title} ",
+                    "--border-label-pos=3",
+                    "--header", prompt,
+                    "--header-first",
+                    f"--query={default}",
+                ],
+                input="",
+                capture_output=True,
+                text=True,
+            )
+            # With --print-query and no items, Enter exits 1 ("no match") while
+            # still printing the query, so the exit code cannot mean "cancel".
+            # Esc exits 130 and prints nothing.
+            if result.returncode == 130:
+                return None
+            lines = result.stdout.splitlines()
+            return lines[0] if lines else None
+        except OSError:
+            pass
+
+    if shutil.which("whiptail") and has_tty():
         code, answer = whiptail(
             ["whiptail", "--title", title, "--inputbox", prompt, "12", "74", default]
         )
-        if code == 0:
-            return answer
-        if code == 1:
-            return None
+        return answer if code == 0 else None
     try:
         with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
             out.write(f"{prompt}\n[{default}] ")
@@ -666,15 +735,12 @@ def menu(text: str, title: str, items: list[tuple[str, str]]) -> str | None:
         except OSError:
             pass
 
-    if shutil.which("whiptail"):
+    if shutil.which("whiptail") and has_tty():
         args = ["whiptail", "--title", title, "--menu", text, "18", "78", str(len(items))]
         for tag, label in items:
             args += [tag, label]
         code, answer = whiptail(args)
-        if code == 0:
-            return answer
-        if code == 1:
-            return None
+        return answer if code == 0 else None
     try:
         with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
             out.write(f"{text}\n\n")

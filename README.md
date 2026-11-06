@@ -126,7 +126,8 @@ Asks for confirmation in a box that defaults to **No**, then removes the session
 │ Fix the tmux status bar                                   │
 │ /home/prep/dotfiles                                       │
 │ The session directory is removed permanently.             │
-│              <No>              <Yes>                      │
+│   No                                                      │
+│   Yes                                                     │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -138,6 +139,8 @@ vibe-sessions --delete <id> --force  # no prompt
 ```
 
 Right-click is bound to the menu, which replaces fzf's default right-click multi-select; this tool doesn't use multi-select.
+
+All three widgets — the action menu, the rename/tag input, and the delete confirmation — are fzf, not whiptail. whiptail does not understand modern key encodings such as CSI-u: it sees the ESC of a Ctrl+Backspace, quits, and the rest of the sequence leaks into the parent fzf as a search query, which empties the list. whiptail is only used when fzf is unavailable.
 
 ## How it reads the store
 
