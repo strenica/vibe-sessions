@@ -24,25 +24,29 @@ Vibe's own `/resume` picker is scoped to the folder you launched it from — ses
 That symlinks `vibe-sessions` into `~/.local/bin` and appends a marked block to `~/.bashrc`:
 
 ```bash
-vibe() {
-    if [ "$1" = "-s" ] || [ "$1" = "--sessions" ]; then
-        shift
-        command vibe-sessions "$@"
-    else
-        command vibe "$@"
-    fi
-}
-bind -x '"\ev": vibe-sessions </dev/tty'
+VIBE_SESSIONS_KEY='\ev'
+bind -x "\"${VIBE_SESSIONS_KEY}\": vibe-sessions </dev/tty"
 ```
 
-Open a new shell, then:
+Open a new shell (or `source ~/.bashrc`), then press **Alt+V** — from anywhere, including mid-command, without disturbing the line you were typing.
 
-- **`vibe -s`** — open the picker
-- **`Alt+V`** — open the picker from anywhere, without touching the command line you were typing
+### Remapping the key
 
-Every other `vibe` invocation passes straight through to the real binary.
+Edit `VIBE_SESSIONS_KEY` in `~/.bashrc` and re-open your shell, or re-run the installer:
 
-Options: `--no-bashrc` installs the command only, `--uninstall` removes both, and `PREFIX` / `BASHRC` override the targets.
+```bash
+./install.sh --key '\C-g'
+```
+
+| Key | Value |
+|---|---|
+| Alt+V | `\ev` |
+| Alt+F | `\ef` |
+| Ctrl+G | `\C-g` |
+| Ctrl+X then Ctrl+S | `\C-x\C-s` |
+| Ctrl+Right | `\e[1;5C` |
+
+Options: `--key` picks the binding, `--no-bashrc` installs the command only, `--uninstall` removes both, and `PREFIX` / `BASHRC` override the targets.
 
 ## Usage
 

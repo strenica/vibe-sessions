@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Install vibe-sessions: put it on PATH and wire up Alt+V / `vibe -s`.
+# Install vibe-sessions: put it on PATH and bind a key to the picker.
 #
-#   ./install.sh              install to ~/.local/bin and add the bashrc block
-#   ./install.sh --no-bashrc  install the command only
-#   ./install.sh --uninstall  remove the command and the bashrc block
+#   ./install.sh                 install to ~/.local/bin, bind Alt+V
+#   ./install.sh --key '\C-g'    bind a different key
+#   ./install.sh --no-bashrc     install the command only
+#   ./install.sh --uninstall     remove the command and the shell block
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
@@ -11,20 +12,27 @@ BASHRC="${BASHRC:-$HOME/.bashrc}"
 BIN_NAME="vibe-sessions"
 BEGIN_MARK="# >>> vibe-sessions >>>"
 END_MARK="# <<< vibe-sessions <<<"
+DEFAULT_KEY='\ev'
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_file="$here/$BIN_NAME"
 
 with_bashrc=1
 uninstall=0
-for arg in "$@"; do
-    case "$arg" in
+key="$DEFAULT_KEY"
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-bashrc) with_bashrc=0 ;;
         --uninstall) uninstall=1 ;;
+        --key) shift; key="${1:-}" ;;
+        --key=*) key="${1#--key=}" ;;
         -h|--help) sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "install.sh: unknown option $arg" >&2; exit 2 ;;
+        *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
     esac
+    shift
 done
+
+[ -n "$key" ] || { echo "install.sh: --key needs a value" >&2; exit 2; }
 
 strip_block() {
     [ -f "$BASHRC" ] || return 0
@@ -63,23 +71,22 @@ esac
 
 if [ "$with_bashrc" -eq 1 ]; then
     strip_block
-    cat >> "$BASHRC" <<'BLOCK'
+    block=$(cat <<'BLOCK'
 # >>> vibe-sessions >>>
-# Alt+V opens a picker of every Vibe session, across all folders.
-# `vibe -s` does the same; every other `vibe` call passes straight through.
-vibe() {
-    if [ "$1" = "-s" ] || [ "$1" = "--sessions" ]; then
-        shift
-        command vibe-sessions "$@"
-    else
-        command vibe "$@"
-    fi
-}
-bind -x '"\ev": vibe-sessions </dev/tty'
+# Opens a picker of every Vibe session, across all folders.
+# To remap, change VIBE_SESSIONS_KEY below and re-open your shell:
+#   \ev        Alt+V            \C-g       Ctrl+G
+#   \ef        Alt+F            \C-x\C-s   Ctrl+X then Ctrl+S
+#   \e[1;5C    Ctrl+Right       \e[1;3C    Alt+Right
+VIBE_SESSIONS_KEY='__KEY__'
+bind -x "\"${VIBE_SESSIONS_KEY}\": vibe-sessions </dev/tty"
 # <<< vibe-sessions <<<
 BLOCK
-    echo "added the Alt+V binding and the \`vibe -s\` wrapper to $BASHRC"
-    echo "Open a new shell (or run: source $BASHRC) to pick them up."
+)
+    block=${block//__KEY__/$key}
+    printf '%s\n' "$block" >> "$BASHRC"
+    echo "bound $key to vibe-sessions in $BASHRC"
+    echo "Open a new shell (or run: source $BASHRC) to pick it up."
 else
     echo "skipped the shell block (--no-bashrc)"
 fi
