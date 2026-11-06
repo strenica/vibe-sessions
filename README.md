@@ -6,7 +6,7 @@ Vibe's own `/resume` picker is scoped to the folder you launched it from — ses
 
 ```
 ┌ vibe sessions ─────────────────────────────────────────────────────────────┐
-│ enter: resume   ctrl-y: copy id   esc: cancel                              │
+│ enter: resume   ctrl-y: copy id   ctrl-x / right-click: delete   esc: cancel│
 │ ● 311b1b43    6m  Projects directory listing          ~/Desktop/projects   │
 │ ○ 3984d2b0   12m  Mistral Vibe CLI architecture       /tmp/test            │
 │ ○ 7f21c9aa    3h  Fix the tmux status bar             ~/dotfiles           │
@@ -55,11 +55,33 @@ vibe-sessions --all           include archived sessions
 vibe-sessions --limit 10      most recent N
 vibe-sessions --filter tmux   non-interactive fuzzy match
 vibe-sessions --preview ID    detail view for one session
+vibe-sessions --delete ID     delete a session (asks first)
 ```
 
 Resuming changes into the session's original folder first, so the agent gets the right project context. `--no-cd` keeps you where you are, `--print` shows the command instead of running it, and `--exec` replaces the shell process instead of running Vibe as a child.
 
 In the picker: `Enter` resumes, `Ctrl+Y` copies the session ID, `Esc` cancels. Typing filters on title, folder, and session ID.
+
+## Deleting sessions
+
+`Ctrl+X` — or a **right-click** on a row — asks for confirmation in a box, then removes the session and reloads the list. The box defaults to **No**, so a stray Enter never deletes anything.
+
+```
+┌┤ Delete session ├──────────────────────────────────────────┐
+│ Delete this session?                                      │
+│                                                           │
+│ Fix the tmux status bar                                   │
+│ /home/prep/dotfiles                                       │
+│                                                           │
+│ The session directory is removed permanently.             │
+│                                                           │
+│              <No>              <Yes>                      │
+└───────────────────────────────────────────────────────────┘
+```
+
+Deleting removes the session directory plus the lock file and `continue-pointers` entry that reference it. A session that a live Vibe process still holds open is refused — close it first. The same flow is available non-interactively as `vibe-sessions --delete <id>` (add `--force` to skip the prompt).
+
+Right-click is bound to delete, which replaces fzf's default right-click multi-select; this tool doesn't use multi-select.
 
 ## How it reads the store
 
@@ -79,10 +101,10 @@ The journal is read newest-first and stops as soon as it has what it needs, so l
 python3 -m unittest discover -s tests -v
 ```
 
-The suite builds a synthetic session store in a temp directory and exercises listing, ordering, folder filtering, archived handling, the running marker, JSON output, previews, and resume-command construction. No Vibe install or real sessions required.
+The suite builds a synthetic session store in a temp directory and exercises listing, ordering, folder filtering, archived handling, the running marker, JSON output, previews, resume-command construction, and deletion (including the refusal to delete a running session and the refusal to delete without confirmation). No Vibe install or real sessions required.
 
 ## Notes
 
 - Python 3.11+ (uses `tomllib` when available; falls back cleanly on older versions).
 - `fzf` is optional — without it you get a numbered menu.
-- Read-only: the tool never writes to the session store.
+- Read-only apart from `--delete`, which removes a session directory and its bookkeeping after confirmation.

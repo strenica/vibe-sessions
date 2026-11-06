@@ -240,6 +240,51 @@ class VibeSessionsTest(unittest.TestCase):
         out = self.run_tool("--filter", "tmux", "--print", "--no-cd").stdout.strip()
         self.assertEqual(out, "vibe --resume aaaaaaaa-1111-2222-3333-444444444444")
 
+    # -- raw (the reload feed) -------------------------------------------- #
+
+    def test_raw_lines_are_row_then_id(self) -> None:
+        lines = [line for line in self.run_tool("--raw").stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            row, session_id = line.split("\t")
+            self.assertRegex(session_id, r"^[0-9a-f-]{36}$")
+            self.assertIn(session_id[:8], row)
+
+    # -- delete ----------------------------------------------------------- #
+
+    def test_delete_removes_directory_and_bookkeeping(self) -> None:
+        session_dir = self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444"
+        self.assertTrue(session_dir.is_dir())
+
+        pointer = self.home / "logs/session/continue-pointers/deadbeef"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text("bbbbbbbb-1111-2222-3333-444444444444")
+
+        result = self.run_tool("--delete", "bbbbbbbb", "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(session_dir.exists())
+        self.assertFalse(pointer.exists())
+        self.assertNotIn("Scrape the catalogue", self.run_tool("--list", "--no-color").stdout)
+
+    def test_delete_refuses_running_session(self) -> None:
+        session_dir = self.home / "logs/session/unified/aaaaaaaa-1111-2222-3333-444444444444"
+        result = self.run_tool("--delete", "aaaaaaaa", "--force")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("running", result.stderr.lower())
+        self.assertTrue(session_dir.is_dir(), "a running session must survive")
+
+    def test_delete_without_confirmation_keeps_session(self) -> None:
+        # No tty in the test harness, so the confirmation cannot be answered.
+        session_dir = self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444"
+        result = self.run_tool("--delete", "bbbbbbbb")
+        self.assertEqual(result.returncode, 130)
+        self.assertTrue(session_dir.is_dir())
+
+    def test_delete_unknown_id(self) -> None:
+        result = self.run_tool("--delete", "nope", "--force")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no session", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

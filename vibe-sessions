@@ -391,6 +391,98 @@ def resume(session: dict, *, change_dir: bool, print_only: bool, exec_shell: boo
     return subprocess.call(command)
 
 
+def confirm(prompt: str, title: str = "vibe-sessions") -> bool:
+    """Yes/no box, defaulting to No so a stray Enter never deletes anything."""
+    if shutil.which("whiptail"):
+        try:
+            # whiptail: 0 = Yes, 1 = No, anything else = it could not draw.
+            code = subprocess.call(
+                ["whiptail", "--title", title, "--yesno", prompt, "14", "74", "--defaultno"],
+                stderr=subprocess.DEVNULL,
+            )
+            if code in (0, 1):
+                return code == 0
+        except OSError:
+            pass
+    try:
+        with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
+            out.write(f"{prompt}\n[y/N] ")
+            out.flush()
+            return inp.readline().strip().lower() in ("y", "yes")
+    except OSError:
+        return False
+
+
+def message(text: str, title: str = "vibe-sessions") -> None:
+    """Show a notice, in a box when we can."""
+    if shutil.which("whiptail"):
+        try:
+            if subprocess.call(
+                ["whiptail", "--title", title, "--msgbox", text, "12", "74"],
+                stderr=subprocess.DEVNULL,
+            ) == 0:
+                return
+        except OSError:
+            pass
+    print(text, file=sys.stderr)
+
+
+def delete_session(session: dict) -> None:
+    """Remove a session directory and the bookkeeping that points at it."""
+    path = Path(session["path"]).resolve()
+    root = session_root().resolve()
+    if root not in path.parents:
+        raise ValueError(f"refusing to delete {path}: outside {root}")
+
+    shutil.rmtree(path)
+
+    active = session_root() / "active"
+    for suffix in (".lock", ".lock.json"):
+        try:
+            (active / f"{session['id']}{suffix}").unlink()
+        except OSError:
+            pass
+
+    pointers = session_root() / "continue-pointers"
+    if pointers.is_dir():
+        for pointer in pointers.iterdir():
+            try:
+                if pointer.read_text().strip() == session["id"]:
+                    pointer.unlink()
+            except OSError:
+                continue
+
+
+def cmd_delete(session: dict, force: bool) -> int:
+    title = session["title"] or "(untitled)"
+    if session["pid"]:
+        message(
+            f"'{title}' is open in a running Vibe process (pid {session['pid']}).\n\n"
+            "Close that session before deleting it.",
+            "Cannot delete",
+        )
+        return 1
+
+    if not force:
+        prompt = (
+            f"Delete this session?\n\n"
+            f"{title}\n"
+            f"{session['directory'] or '?'}\n\n"
+            f"The session directory is removed permanently."
+        )
+        if not confirm(prompt, "Delete session"):
+            return 130
+
+    try:
+        delete_session(session)
+    except (OSError, ValueError) as error:
+        message(f"Could not delete the session:\n\n{error}", "Delete failed")
+        return 1
+
+    print(f"deleted {session['short']}  {title}")
+    return 0
+
+
 def pick(sessions: list[dict], args) -> int:
     if not sessions:
         print("No sessions found.", file=sys.stderr)
@@ -405,9 +497,17 @@ def pick(sessions: list[dict], args) -> int:
         row = table_row(session, color=True)
         lines.append(f"{row}\t{session['id']}")
 
-    header = "enter: resume   ctrl-y: copy id   esc: cancel"
+    header = "enter: resume   ctrl-y: copy id   ctrl-x / right-click: delete   esc: cancel"
     if args.only_folder:
         header += "   (this folder only)"
+
+    # `reload` must rebuild the list with the same filters the picker started with.
+    reload_cmd = f"{sys.executable} {script} --raw"
+    if args.all:
+        reload_cmd += " --all"
+    if args.only_folder:
+        reload_cmd += " --folder"
+    delete_cmd = f"{sys.executable} {script} --delete {{2}}"
 
     fzf = [
         "fzf",
@@ -416,6 +516,10 @@ def pick(sessions: list[dict], args) -> int:
         "--with-nth=1",
         "--height=90%",
         "--layout=reverse",
+        # Keep the cursor on the same session across the reload that follows a
+        # delete attempt; without this it jumps to row 1 and the next delete
+        # would hit the wrong session.
+        "--track",
         "--border=rounded",
         "--border-label= vibe sessions ",
         "--border-label-pos=3",
@@ -427,6 +531,8 @@ def pick(sessions: list[dict], args) -> int:
         "--preview", f"{sys.executable} {script} --preview {{2}}",
         "--preview-window=right,60%,wrap,border-left",
         "--bind=ctrl-y:execute-silent(printf %s {2} | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel -b 2>/dev/null || true))+change-header(id copied)",
+        f"--bind=ctrl-x:execute({delete_cmd})+reload({reload_cmd})",
+        f"--bind=right-click:execute({delete_cmd})+reload({reload_cmd})",
     ]
     if args.filter:
         fzf += ["--filter", args.filter]
@@ -470,17 +576,25 @@ def pick_fallback(sessions: list[dict], args) -> int:
     print_table(sessions, color=sys.stdout.isatty())
     print()
     try:
-        choice = input("resume which session? [1-%d, empty to cancel] " % len(sessions)).strip()
+        choice = input(
+            "resume which session? [1-%d, d<N> to delete, empty to cancel] " % len(sessions)
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return 130
     if not choice:
         return 130
+
+    deleting = choice[:1] in ("d", "D")
+    if deleting:
+        choice = choice[1:].strip()
     try:
         session = sessions[int(choice) - 1]
     except (ValueError, IndexError):
         print("vibe-sessions: not a valid choice", file=sys.stderr)
         return 1
+    if deleting:
+        return cmd_delete(session, force=False)
     return resume(session, change_dir=not args.no_cd, print_only=args.print, exec_shell=args.exec)
 
 
@@ -511,6 +625,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--filter", metavar="QUERY",
                         help="non-interactive fuzzy match, prints the matching rows")
     parser.add_argument("--preview", metavar="ID", help="print the detail view for one session and exit")
+    parser.add_argument("--delete", metavar="ID",
+                        help="delete a session (asks first; refuses while it is running)")
+    parser.add_argument("--force", action="store_true", help="skip the confirmation for --delete")
+    parser.add_argument("--raw", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-cd", action="store_true", help="resume without changing to the session's folder")
     parser.add_argument("--print", action="store_true", help="print the resume command instead of running it")
     parser.add_argument("--exec", action="store_true", help="replace this process with vibe instead of running it as a child")
@@ -518,18 +636,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def find_session(identifier: str, deep: bool = False) -> dict | None:
+    """Resolve a full id or an 8-character prefix, archived sessions included."""
+    live = running_pids()
+    for path in session_dirs():
+        session = load_session(path, live, deep=deep)
+        if session["id"] == identifier or session["short"] == identifier:
+            return session
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.preview:
-        live = running_pids()
-        for path in session_dirs():
-            session = load_session(path, live, deep=True)
-            if session["id"] == args.preview or session["short"] == args.preview:
-                print_preview(session)
-                return 0
-        print(f"vibe-sessions: no session {args.preview}", file=sys.stderr)
-        return 1
+        session = find_session(args.preview, deep=True)
+        if session is None:
+            print(f"vibe-sessions: no session {args.preview}", file=sys.stderr)
+            return 1
+        print_preview(session)
+        return 0
+
+    if args.delete:
+        session = find_session(args.delete)
+        if session is None:
+            print(f"vibe-sessions: no session {args.delete}", file=sys.stderr)
+            return 1
+        return cmd_delete(session, force=args.force)
 
     sessions = collect(
         include_archived=args.all,
@@ -537,6 +670,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.limit > 0:
         sessions = sessions[: args.limit]
+
+    if args.raw:
+        for session in sessions:
+            print(f"{table_row(session, color=True)}\t{session['id']}")
+        return 0
 
     if args.json:
         payload = []
