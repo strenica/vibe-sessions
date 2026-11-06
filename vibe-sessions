@@ -484,6 +484,19 @@ def resume(session: dict, *, change_dir: bool, print_only: bool, exec_shell: boo
     return subprocess.call(command)
 
 
+def clear_screen() -> None:
+    """Blank the terminal before a nested fzf draws its window.
+
+    A nested fzf renders in a window and leaves the rest of the screen alone,
+    so without this the parent picker stays visible around and behind the
+    menu, which reads as the menu being appended to the list rather than
+    being its own thing.
+    """
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+
 def has_tty() -> bool:
     """True when there is a controlling terminal to draw a box on."""
     try:
@@ -503,6 +516,7 @@ def confirm(prompt: str, title: str = "vibe-sessions") -> bool:
     """
     if shutil.which("fzf"):
         try:
+            clear_screen()
             result = subprocess.run(
                 [
                     "fzf",
@@ -657,6 +671,7 @@ def ask(prompt: str, title: str, default: str = "") -> str | None:
     """
     if shutil.which("fzf"):
         try:
+            clear_screen()
             result = subprocess.run(
                 [
                     "fzf",
@@ -710,12 +725,13 @@ def menu(text: str, title: str, items: list[tuple[str, str]]) -> str | None:
     if shutil.which("fzf"):
         lines = [f"{tag}\t{label}" for tag, label in items]
         try:
+            clear_screen()
             result = subprocess.run(
                 [
                     "fzf",
                     "--delimiter=\t",
                     "--with-nth=2",
-                    "--height=~50%",
+                    "--height=12",
                     "--layout=reverse",
                     "--border=rounded",
                     f"--border-label= {title} ",
