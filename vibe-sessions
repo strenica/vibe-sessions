@@ -844,7 +844,7 @@ def pick(sessions: list[dict], args) -> int:
 
     header = (
         "enter resume  ·  ctrl-y copy id  ·  ctrl-x delete  ·  "
-        "right-click menu  ·  ctrl-s sort  ·  esc cancel"
+        "→ / right-click menu  ·  ctrl-s sort  ·  esc cancel"
     )
     if args.only_folder:
         header += "   (this folder only)"
@@ -858,6 +858,15 @@ def pick(sessions: list[dict], args) -> int:
     delete_cmd = f"{sys.executable} {script} --delete {{2}}"
     menu_cmd = f"{sys.executable} {script} --menu {{2}}"
     cycle_cmd = f"{sys.executable} {script} --cycle-sort"
+
+    # Right arrow opens the menu for keyboard-only use, but only when the query
+    # is empty: while typing, it must stay forward-char or the cursor breaks.
+    menu_action = f"execute({menu_cmd})+reload({reload_cmd})"
+    right_bind = (
+        "right:transform:"
+        'if [ -n "$FZF_QUERY" ]; then echo forward-char; '
+        'else echo "' + menu_action + '"; fi'
+    )
 
     fzf = [
         "fzf",
@@ -883,6 +892,7 @@ def pick(sessions: list[dict], args) -> int:
         "--bind=ctrl-y:execute-silent(printf %s {2} | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel -b 2>/dev/null || true))+change-header(id copied)",
         f"--bind=ctrl-x:execute({delete_cmd})+reload({reload_cmd})",
         f"--bind=right-click:execute({menu_cmd})+reload({reload_cmd})",
+        f"--bind={right_bind}",
         f"--bind=ctrl-s:execute({cycle_cmd})+reload({reload_cmd})",
     ]
     if args.filter:

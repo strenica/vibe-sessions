@@ -6,7 +6,7 @@ Vibe's own `/resume` picker is scoped to the folder you launched it from — ses
 
 ```
 ┌ vibe sessions ─────────────────────────────────────────────────────────────┐
-│ enter resume · ctrl-y copy id · ctrl-x delete · right-click menu · ctrl-s sort │
+│ enter resume · ctrl-y copy id · ctrl-x delete · → / right-click menu · ctrl-s sort │
 │ ● 311b1b43    6m  Projects directory listing      ~/Desktop/projects  #work  │
 │ ○ 3984d2b0   12m  Mistral Vibe CLI architecture   /tmp/test                  │
 │ ○ 7f21c9aa    3h  Fix the tmux status bar         ~/dotfiles          #dot   │
@@ -69,6 +69,8 @@ Resuming changes into the session's original folder first, so the agent gets the
 
 In the picker: `Enter` resumes, `Ctrl+Y` copies the session ID, `Ctrl+X` deletes, `Ctrl+S` cycles the sort order, `Esc` cancels. Typing filters on title, folder, tags, and session ID.
 
+`→` opens the action menu, so the whole thing is usable without a mouse. It only does that while the search box is empty — once you start typing, `→` moves the cursor as usual.
+
 ## Sorting
 
 The list is sorted by `status` by default: sessions a live process holds open come first, then most recently used. `Ctrl+S` cycles through the modes and remembers your choice; `--sort` sets it directly.
@@ -82,7 +84,7 @@ The list is sorted by `status` by default: sessions a live process holds open co
 
 ## Managing sessions
 
-**Right-click a row** to open an action menu — the same idea as tmux's `display-menu`:
+**Right-click a row** — or press `→` with an empty search box — to open an action menu, the same idea as tmux's `display-menu`:
 
 ```
 ┌┤ Session ├──────────────────────────────────────────────────┐
