@@ -285,6 +285,35 @@ class VibeSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no session", result.stderr)
 
+    def test_delete_leaves_the_project_directory_untouched(self) -> None:
+        """Deleting a session must never touch the folder it ran in."""
+        project = self.home / "myproject"
+        project.mkdir()
+        (project / "main.py").write_text("print('hi')\n")
+        (project / "data.txt").write_text("important\n")
+        (project / "sub").mkdir()
+        (project / "sub" / "nested.txt").write_text("also important\n")
+
+        write_session(
+            self.home,
+            "dddddddd-1111-2222-3333-444444444444",
+            title="Work in a project",
+            directory=str(project),
+            bumped="2026-11-04T10:00:00+00:00",
+        )
+
+        result = self.run_tool("--delete", "dddddddd", "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        session_dir = self.home / "logs/session/unified/dddddddd-1111-2222-3333-444444444444"
+        self.assertFalse(session_dir.exists(), "the session directory should be gone")
+
+        self.assertTrue((project / "main.py").is_file())
+        self.assertTrue((project / "data.txt").is_file())
+        self.assertTrue((project / "sub" / "nested.txt").is_file())
+        self.assertEqual((project / "main.py").read_text(), "print('hi')\n")
+        self.assertEqual((project / "data.txt").read_text(), "important\n")
+
 
 if __name__ == "__main__":
     unittest.main()
