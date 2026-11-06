@@ -139,7 +139,11 @@ class VibeSessionsTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_tool(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-        env = dict(os.environ, VIBE_HOME=str(self.home))
+        env = dict(
+            os.environ,
+            VIBE_HOME=str(self.home),
+            XDG_STATE_HOME=str(self.home / "state"),
+        )
         return subprocess.run(
             [sys.executable, str(SCRIPT), *args],
             capture_output=True,
@@ -182,7 +186,7 @@ class VibeSessionsTest(unittest.TestCase):
     def test_empty_store(self) -> None:
         empty = self.home / "empty"
         empty.mkdir()
-        env = dict(os.environ, VIBE_HOME=str(empty))
+        env = dict(os.environ, VIBE_HOME=str(empty), XDG_STATE_HOME=str(self.home / "state"))
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--list"], capture_output=True, text=True, env=env
         )
@@ -249,6 +253,83 @@ class VibeSessionsTest(unittest.TestCase):
             row, session_id = line.split("\t")
             self.assertRegex(session_id, r"^[0-9a-f-]{36}$")
             self.assertIn(session_id[:8], row)
+
+
+    # -- rename ----------------------------------------------------------- #
+
+    def test_rename_sets_a_manual_title(self) -> None:
+        result = self.run_tool("--rename", "bbbbbbbb", "--title", "Scraper, renamed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Scraper, renamed", self.run_tool("--list", "--no-color").stdout)
+
+        meta = json.loads(
+            (self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json").read_text()
+        )
+        self.assertEqual(meta["title"], "Scraper, renamed")
+        self.assertEqual(meta["title_source"], "manual")
+
+    def test_rename_refuses_running_session(self) -> None:
+        result = self.run_tool("--rename", "aaaaaaaa", "--title", "nope")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("running", result.stderr.lower())
+
+    def test_rename_rejects_empty_title(self) -> None:
+        result = self.run_tool("--rename", "bbbbbbbb", "--title", "   ")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Scrape the catalogue", self.run_tool("--list", "--no-color").stdout)
+
+    # -- tags ------------------------------------------------------------- #
+
+    def test_tag_roundtrip(self) -> None:
+        result = self.run_tool("--tag", "bbbbbbbb", "--tags", "work, urgent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        payload = json.loads(self.run_tool("--json").stdout)
+        tagged = next(item for item in payload if item["short"] == "bbbbbbbb")
+        self.assertEqual(tagged["tags"], ["work", "urgent"])
+
+        out = self.run_tool("--list", "--no-color").stdout
+        self.assertIn("#work", out)
+        self.assertIn("#urgent", out)
+
+    def test_tag_clears_with_empty_value(self) -> None:
+        self.run_tool("--tag", "bbbbbbbb", "--tags", "work")
+        self.run_tool("--tag", "bbbbbbbb", "--tags", "")
+        payload = json.loads(self.run_tool("--json").stdout)
+        tagged = next(item for item in payload if item["short"] == "bbbbbbbb")
+        self.assertEqual(tagged["tags"], [])
+
+    def test_tags_survive_a_rename(self) -> None:
+        self.run_tool("--tag", "bbbbbbbb", "--tags", "keepme")
+        self.run_tool("--rename", "bbbbbbbb", "--title", "Renamed")
+        payload = json.loads(self.run_tool("--json").stdout)
+        tagged = next(item for item in payload if item["short"] == "bbbbbbbb")
+        self.assertEqual(tagged["tags"], ["keepme"])
+
+    # -- sort ------------------------------------------------------------- #
+
+    def test_default_sort_puts_running_first(self) -> None:
+        out = self.run_tool("--list", "--no-color").stdout
+        self.assertLess(out.index("Fix the tmux bar"), out.index("Scrape the catalogue"))
+
+    def test_sort_by_title(self) -> None:
+        out = self.run_tool("--list", "--all", "--sort", "title", "--no-color").stdout
+        self.assertLess(out.index("Fix the tmux bar"), out.index("Old archived thing"))
+        self.assertLess(out.index("Old archived thing"), out.index("Scrape the catalogue"))
+
+    def test_sort_by_folder(self) -> None:
+        out = self.run_tool("--list", "--all", "--sort", "folder", "--no-color").stdout
+        # /tmp/elsewhere < /tmp/old < <workdir>
+        self.assertLess(out.index("Scrape the catalogue"), out.index("Old archived thing"))
+
+    def test_cycle_sort_walks_the_modes(self) -> None:
+        seen = [self.run_tool("--cycle-sort").stdout.strip() for _ in range(4)]
+        self.assertEqual(seen, ["recent", "title", "folder", "status"])
+
+    def test_sort_preference_persists(self) -> None:
+        self.run_tool("--sort", "title")
+        out = self.run_tool("--list", "--all", "--no-color").stdout
+        self.assertLess(out.index("Old archived thing"), out.index("Scrape the catalogue"))
 
     # -- delete ----------------------------------------------------------- #
 

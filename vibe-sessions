@@ -83,6 +83,91 @@ def session_dirs() -> list[Path]:
 
 
 # --------------------------------------------------------------------------- #
+# tags and sort preference
+#
+# Vibe has no notion of tags, so they live in a sidecar file this tool owns.
+# Keeping them out of meta.json means Vibe rewriting a session cannot drop them.
+# --------------------------------------------------------------------------- #
+
+SORT_MODES = ("status", "recent", "title", "folder")
+DEFAULT_SORT = "status"
+
+
+def state_path() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "vibe-sessions" / "state.json"
+
+
+_STATE: dict | None = None
+
+
+def load_state() -> dict:
+    global _STATE
+    if _STATE is None:
+        try:
+            _STATE = json.loads(state_path().read_text())
+        except (OSError, ValueError):
+            _STATE = {}
+        if not isinstance(_STATE, dict):
+            _STATE = {}
+    return _STATE
+
+
+def save_state() -> None:
+    path = state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(load_state(), indent=2, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def session_tags(session_id: str) -> list[str]:
+    tags = (load_state().get("tags") or {}).get(session_id) or []
+    return [str(tag) for tag in tags]
+
+
+def set_session_tags(session_id: str, tags: list[str]) -> None:
+    state = load_state()
+    all_tags = state.setdefault("tags", {})
+    if tags:
+        all_tags[session_id] = tags
+    else:
+        all_tags.pop(session_id, None)
+    save_state()
+
+
+def current_sort() -> str:
+    mode = load_state().get("sort") or DEFAULT_SORT
+    return mode if mode in SORT_MODES else DEFAULT_SORT
+
+
+def set_sort(mode: str) -> None:
+    load_state()["sort"] = mode
+    save_state()
+
+
+def cycle_sort() -> str:
+    mode = current_sort()
+    nxt = SORT_MODES[(SORT_MODES.index(mode) + 1) % len(SORT_MODES)]
+    set_sort(nxt)
+    return nxt
+
+
+def sort_sessions(sessions: list[dict], mode: str) -> list[dict]:
+    """Sort in place. `status` puts live sessions first, then most recent."""
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    sessions.sort(key=lambda s: s["updated"] or floor, reverse=True)
+    if mode == "status":
+        sessions.sort(key=lambda s: 0 if s["pid"] else 1)
+    elif mode == "title":
+        sessions.sort(key=lambda s: (s["title"] or s["preview"] or "").lower())
+    elif mode == "folder":
+        sessions.sort(key=lambda s: (s["directory"] or "").lower())
+    return sessions
+
+
+# --------------------------------------------------------------------------- #
 # reading a session
 # --------------------------------------------------------------------------- #
 
@@ -219,6 +304,7 @@ def load_session(session_dir: Path, live: dict[str, int], deep: bool = False) ->
         "tokens": 0,
         "cached_tokens": 0,
         "status": "",
+        "tags": session_tags(session_id),
     }
 
     if deep:
@@ -238,7 +324,11 @@ def load_session(session_dir: Path, live: dict[str, int], deep: bool = False) ->
     return session
 
 
-def collect(include_archived: bool = False, only_dir: str | None = None) -> list[dict]:
+def collect(
+    include_archived: bool = False,
+    only_dir: str | None = None,
+    sort: str | None = None,
+) -> list[dict]:
     live = running_pids()
     sessions = []
     for path in session_dirs():
@@ -248,8 +338,7 @@ def collect(include_archived: bool = False, only_dir: str | None = None) -> list
         if only_dir and os.path.realpath(session["directory"] or "") != os.path.realpath(only_dir):
             continue
         sessions.append(session)
-    sessions.sort(key=lambda s: s["updated"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    return sessions
+    return sort_sessions(sessions, sort or current_sort())
 
 
 # --------------------------------------------------------------------------- #
@@ -299,21 +388,25 @@ def truncate(text: str, width: int) -> str:
 DIM = "\033[2m"
 GREEN = "\033[32m"
 CYAN = "\033[36m"
+YELLOW = "\033[33m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
 
 def table_row(session: dict, color: bool) -> str:
-    """One aligned row: status, id, age, title, folder."""
+    """One aligned row: status, id, age, title, folder, tags."""
     dot = "●" if session["pid"] else "○"
     title = truncate(session["title"] or session["preview"] or "(untitled)", 44)
     folder = pretty_path(session["directory"], 34)
     age = pretty_age(session["updated"]).rjust(4)
+    tags = " ".join(f"#{tag}" for tag in session.get("tags") or [])
     if color:
         dot = f"{GREEN}{dot}{RESET}" if session["pid"] else f"{DIM}{dot}{RESET}"
         age = f"{DIM}{age}{RESET}"
         folder = f"{CYAN}{folder}{RESET}"
-    return f"{dot} {session['short']}  {age}  {title:<44}  {folder}"
+        tags = f"{YELLOW}{tags}{RESET}" if tags else ""
+    row = f"{dot} {session['short']}  {age}  {title:<44}  {folder}"
+    return f"{row}  {tags}" if tags else row
 
 
 def print_table(sessions: list[dict], color: bool) -> None:
@@ -483,6 +576,192 @@ def cmd_delete(session: dict, force: bool) -> int:
     return 0
 
 
+def whiptail(args: list[str]) -> tuple[int, str]:
+    """Run whiptail with its UI on the terminal and its answer on a pipe.
+
+    whiptail draws on stdout, so capturing stdout would swallow the box. It
+    writes the answer to --output-fd instead, which leaves stdout alone.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        code = subprocess.call(
+            args + ["--output-fd", str(write_fd)],
+            pass_fds=(write_fd,),
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        return 255, ""
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+    chunks = []
+    while True:
+        try:
+            chunk = os.read(read_fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    os.close(read_fd)
+    return code, b"".join(chunks).decode("utf-8", "replace").strip()
+
+
+def ask(prompt: str, title: str, default: str = "") -> str | None:
+    """Single-line input box. Returns None when cancelled."""
+    if shutil.which("whiptail"):
+        code, answer = whiptail(
+            ["whiptail", "--title", title, "--inputbox", prompt, "12", "74", default]
+        )
+        if code == 0:
+            return answer
+        if code == 1:
+            return None
+    try:
+        with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
+            out.write(f"{prompt}\n[{default}] ")
+            out.flush()
+            answer = inp.readline().strip()
+            return answer or default
+    except OSError:
+        return None
+
+
+def menu(text: str, title: str, items: list[tuple[str, str]]) -> str | None:
+    """A tmux display-menu style list of actions. Returns the chosen tag.
+
+    fzf is preferred over whiptail here: this runs inside fzf's own `execute`,
+    and a nested fzf restores the terminal correctly, whereas whiptail draws
+    but never receives the keystrokes.
+    """
+    if shutil.which("fzf"):
+        lines = [f"{tag}\t{label}" for tag, label in items]
+        try:
+            result = subprocess.run(
+                [
+                    "fzf",
+                    "--delimiter=\t",
+                    "--with-nth=2",
+                    "--height=~50%",
+                    "--layout=reverse",
+                    "--border=rounded",
+                    f"--border-label= {title} ",
+                    "--border-label-pos=3",
+                    "--header", text,
+                    "--header-first",
+                    "--no-info",
+                    "--pointer=▶",
+                ],
+                input="\n".join(lines),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                return None
+            return result.stdout.rstrip("\n").split("\t")[0]
+        except OSError:
+            pass
+
+    if shutil.which("whiptail"):
+        args = ["whiptail", "--title", title, "--menu", text, "18", "78", str(len(items))]
+        for tag, label in items:
+            args += [tag, label]
+        code, answer = whiptail(args)
+        if code == 0:
+            return answer
+        if code == 1:
+            return None
+    try:
+        with open("/dev/tty", "w") as out, open("/dev/tty", "r") as inp:
+            out.write(f"{text}\n\n")
+            for index, (_, label) in enumerate(items, 1):
+                out.write(f"  {index}) {label}\n")
+            out.write("choose: ")
+            out.flush()
+            raw = inp.readline().strip()
+            if not raw:
+                return None
+            return items[int(raw) - 1][0]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def rename_session(session: dict, title: str) -> None:
+    """Set a manual title in meta.json, the same field Vibe's /rename writes."""
+    if session["pid"]:
+        raise ValueError("the session is open in a running Vibe process")
+    meta_path = Path(session["path"]) / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["title"] = title
+    meta["title_source"] = "manual"
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+
+def cmd_rename(session: dict, title: str | None) -> int:
+    if title is None:
+        title = ask("New title:", "Rename session", session["title"] or "")
+        if title is None:
+            return 130
+    title = title.strip()
+    if not title:
+        message("A session needs a title.", "Rename failed")
+        return 1
+    try:
+        rename_session(session, title)
+    except (OSError, ValueError) as error:
+        message(f"Could not rename the session:\n\n{error}", "Rename failed")
+        return 1
+    print(f"renamed {session['short']}  {title}")
+    return 0
+
+
+def cmd_tag(session: dict, tags: str | None) -> int:
+    if tags is None:
+        tags = ask(
+            "Tags, comma separated (empty clears):",
+            "Tag session",
+            ", ".join(session.get("tags") or []),
+        )
+        if tags is None:
+            return 130
+    parsed = [tag.strip().lstrip("#") for tag in tags.split(",")]
+    parsed = [tag for tag in parsed if tag]
+    set_session_tags(session["id"], parsed)
+    print(f"tagged {session['short']}  {' '.join('#' + t for t in parsed) or '(no tags)'}")
+    return 0
+
+
+def cmd_menu(session: dict) -> int:
+    """Right-click menu: the management actions for one session."""
+    title = session["title"] or "(untitled)"
+    tags = " ".join(f"#{tag}" for tag in session.get("tags") or []) or "(none)"
+    text = f"{title}\n{session['directory'] or '?'}\nTags: {tags}"
+
+    choice = menu(
+        text,
+        "Session",
+        [
+            ("rename", "Rename this session"),
+            ("tag", "Tag this session"),
+            ("delete", "Delete this session"),
+            ("cancel", "Cancel"),
+        ],
+    )
+    if choice is None or choice == "cancel":
+        return 130
+    if choice == "rename":
+        return cmd_rename(session, None)
+    if choice == "tag":
+        return cmd_tag(session, None)
+    if choice == "delete":
+        return cmd_delete(session, force=False)
+    return 130
+
+
 def pick(sessions: list[dict], args) -> int:
     if not sessions:
         print("No sessions found.", file=sys.stderr)
@@ -497,7 +776,10 @@ def pick(sessions: list[dict], args) -> int:
         row = table_row(session, color=True)
         lines.append(f"{row}\t{session['id']}")
 
-    header = "enter: resume   ctrl-y: copy id   ctrl-x / right-click: delete   esc: cancel"
+    header = (
+        "enter resume  ·  ctrl-y copy id  ·  ctrl-x delete  ·  "
+        "right-click menu  ·  ctrl-s sort  ·  esc cancel"
+    )
     if args.only_folder:
         header += "   (this folder only)"
 
@@ -508,13 +790,15 @@ def pick(sessions: list[dict], args) -> int:
     if args.only_folder:
         reload_cmd += " --folder"
     delete_cmd = f"{sys.executable} {script} --delete {{2}}"
+    menu_cmd = f"{sys.executable} {script} --menu {{2}}"
+    cycle_cmd = f"{sys.executable} {script} --cycle-sort"
 
     fzf = [
         "fzf",
         "--ansi",
         "--delimiter=\t",
         "--with-nth=1",
-        "--height=90%",
+        "--height=100%",
         "--layout=reverse",
         # Keep the cursor on the same session across the reload that follows a
         # delete attempt; without this it jumps to row 1 and the next delete
@@ -532,7 +816,8 @@ def pick(sessions: list[dict], args) -> int:
         "--preview-window=right,60%,wrap,border-left",
         "--bind=ctrl-y:execute-silent(printf %s {2} | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel -b 2>/dev/null || true))+change-header(id copied)",
         f"--bind=ctrl-x:execute({delete_cmd})+reload({reload_cmd})",
-        f"--bind=right-click:execute({delete_cmd})+reload({reload_cmd})",
+        f"--bind=right-click:execute({menu_cmd})+reload({reload_cmd})",
+        f"--bind=ctrl-s:execute({cycle_cmd})+reload({reload_cmd})",
     ]
     if args.filter:
         fzf += ["--filter", args.filter]
@@ -628,6 +913,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delete", metavar="ID",
                         help="delete a session (asks first; refuses while it is running)")
     parser.add_argument("--force", action="store_true", help="skip the confirmation for --delete")
+    parser.add_argument("--menu", metavar="ID",
+                        help="open the action menu for one session (rename, tag, delete)")
+    parser.add_argument("--rename", metavar="ID", help="rename a session")
+    parser.add_argument("--title", metavar="TEXT", help="the new title for --rename")
+    parser.add_argument("--tag", metavar="ID", help="set the tags for a session")
+    parser.add_argument("--tags", metavar="LIST", help="comma separated tags for --tag")
+    parser.add_argument("--sort", metavar="MODE", choices=SORT_MODES,
+                        help="sort order, remembered: " + ", ".join(SORT_MODES))
+    parser.add_argument("--cycle-sort", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--raw", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-cd", action="store_true", help="resume without changing to the session's folder")
     parser.add_argument("--print", action="store_true", help="print the resume command instead of running it")
@@ -663,6 +957,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"vibe-sessions: no session {args.delete}", file=sys.stderr)
             return 1
         return cmd_delete(session, force=args.force)
+
+    if args.cycle_sort:
+        print(cycle_sort())
+        return 0
+
+    if args.sort:
+        set_sort(args.sort)
+
+    for flag, handler in (
+        (args.menu, cmd_menu),
+        (args.rename, lambda s: cmd_rename(s, args.title)),
+        (args.tag, lambda s: cmd_tag(s, args.tags)),
+    ):
+        if flag:
+            session = find_session(flag)
+            if session is None:
+                print(f"vibe-sessions: no session {flag}", file=sys.stderr)
+                return 1
+            return handler(session)
 
     sessions = collect(
         include_archived=args.all,
