@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""vibe-sessions — browse and resume every Mistral Vibe session, across all folders.
+
+Vibe's own `/resume` picker only lists sessions whose working directory matches
+the folder you launched it from. This tool reads the session store directly, so
+you get one table of everything, with a preview pane and a resume action.
+
+    vibe-sessions              fuzzy picker (fzf), Enter resumes
+    vibe-sessions --list       plain table, no picker
+    vibe-sessions --json       machine-readable
+    vibe-sessions --preview ID detail for one session
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# store discovery
+# --------------------------------------------------------------------------- #
+
+STORE_FORMAT = "mistral.vibe.unified-session-store"
+
+
+def vibe_home() -> Path:
+    return Path(os.environ.get("VIBE_HOME") or Path.home() / ".vibe")
+
+
+def session_root() -> Path:
+    """Where session directories live.
+
+    Honours `session_logging.save_dir` from config.toml when set, otherwise the
+    default `$VIBE_HOME/logs/session`.
+    """
+    default = vibe_home() / "logs" / "session"
+    config = vibe_home() / "config.toml"
+    if not config.is_file():
+        return default
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - python < 3.11
+        return default
+    try:
+        with config.open("rb") as fh:
+            data = tomllib.load(fh)
+    except Exception:
+        return default
+    save_dir = (data.get("session_logging") or {}).get("save_dir") or ""
+    if save_dir:
+        return Path(os.path.expanduser(save_dir))
+    return default
+
+
+def session_dirs() -> list[Path]:
+    """Every session directory, newest layout first.
+
+    The unified store keeps sessions in `<root>/unified/<id>/`; older builds
+    wrote `<root>/<id>/` directly. Both are scanned so a store that predates an
+    upgrade still shows up.
+    """
+    root = session_root()
+    found: list[Path] = []
+    unified = root / "unified"
+    if unified.is_dir():
+        found.extend(sorted(p for p in unified.iterdir() if (p / "meta.json").is_file()))
+    if root.is_dir():
+        found.extend(
+            sorted(
+                p
+                for p in root.iterdir()
+                if p.is_dir() and p.name not in {"unified", "active", "plugins", "continue-pointers"}
+                and (p / "meta.json").is_file()
+            )
+        )
+    return found
+
+
+# --------------------------------------------------------------------------- #
+# reading a session
+# --------------------------------------------------------------------------- #
+
+
+def _parse_ts(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _journal_files(session_dir: Path) -> list[Path]:
+    journal = session_dir / "journal"
+    if not journal.is_dir():
+        return []
+    return sorted(journal.glob("*.jsonl"))
+
+
+def _iter_records_reversed(session_dir: Path):
+    """Yield journal records newest-first, without loading the whole store."""
+    for path in reversed(_journal_files(session_dir)):
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
+
+
+def read_envelope(session_dir: Path) -> dict:
+    """The last `set_envelope` state — title, preview, status, token usage."""
+    for record in _iter_records_reversed(session_dir):
+        for delta in (record.get("payload") or {}).get("delta") or []:
+            if isinstance(delta, dict) and delta.get("op") == "set_envelope":
+                return delta.get("state") or {}
+    return {}
+
+
+def read_tail_entries(session_dir: Path, limit: int = 6) -> list[dict]:
+    """The last few user/assistant messages, oldest-first."""
+    seen: dict[str, dict] = {}
+    order: list[str] = []
+    for record in _iter_records_reversed(session_dir):
+        for delta in (record.get("payload") or {}).get("delta") or []:
+            if not isinstance(delta, dict):
+                continue
+            if delta.get("op") not in ("append_entry", "replace_entry"):
+                continue
+            entry = delta.get("entry") or {}
+            entry_id = entry.get("id")
+            if not entry_id or entry_id in seen:
+                continue
+            if entry.get("role") not in ("user", "assistant"):
+                continue
+            text = " ".join(
+                part.get("text", "")
+                for part in (entry.get("content") or [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+            if not text:
+                continue
+            seen[entry_id] = {"role": entry["role"], "text": text, "at": entry.get("createdAt")}
+            order.append(entry_id)
+            if len(order) >= limit:
+                return [seen[i] for i in reversed(order)]
+    return [seen[i] for i in reversed(order)]
+
+
+def running_pids() -> dict[str, int]:
+    """session_id -> pid for sessions a live process currently holds open."""
+    locks = session_root() / "active"
+    if not locks.is_dir():
+        return {}
+    live: dict[str, int] = {}
+    for path in locks.glob("*.lock.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        session_id = data.get("session_id")
+        pid = data.get("process_id")
+        if not session_id or not isinstance(pid, int):
+            continue
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue
+        live[session_id] = pid
+    return live
+
+
+def load_session(session_dir: Path, live: dict[str, int], deep: bool = False) -> dict:
+    try:
+        meta = json.loads((session_dir / "meta.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+
+    session_id = meta.get("session_id") or session_dir.name
+    config = meta.get("config") or {}
+    environment = meta.get("environment") or {}
+    directory = (
+        meta.get("origin_directory")
+        or environment.get("working_directory")
+        or ""
+    )
+
+    session = {
+        "id": session_id,
+        "short": session_id[:8],
+        "title": meta.get("title") or "",
+        "title_source": meta.get("title_source") or "",
+        "directory": directory,
+        "model": config.get("active_model") or "",
+        "model_name": config.get("model_name") or "",
+        "branch": meta.get("git_branch") or "",
+        "started": _parse_ts(meta.get("start_time")),
+        "updated": _parse_ts(meta.get("bumped_at")) or _parse_ts(meta.get("start_time")),
+        "archived": bool(meta.get("archived_at")),
+        "pinned": bool(meta.get("pinned_at")),
+        "children": len(meta.get("child_sessions") or []),
+        "pid": live.get(session_id),
+        "path": str(session_dir),
+        "preview": "",
+        "tokens": 0,
+        "cached_tokens": 0,
+        "status": "",
+    }
+
+    if deep:
+        envelope = read_envelope(session_dir)
+        state = envelope.get("session") or {}
+        usage = state.get("tokenUsage") or {}
+        session["preview"] = state.get("preview") or ""
+        session["tokens"] = usage.get("totalTokens") or 0
+        session["cached_tokens"] = usage.get("cachedInputTokens") or 0
+        status = state.get("status") or {}
+        session["status"] = status.get("type") or "" if isinstance(status, dict) else str(status)
+        if not session["title"]:
+            session["title"] = state.get("title") or ""
+        if not session["updated"]:
+            session["updated"] = _parse_ts(state.get("updatedAt"))
+
+    return session
+
+
+def collect(include_archived: bool = False, only_dir: str | None = None) -> list[dict]:
+    live = running_pids()
+    sessions = []
+    for path in session_dirs():
+        session = load_session(path, live)
+        if session["archived"] and not include_archived:
+            continue
+        if only_dir and os.path.realpath(session["directory"] or "") != os.path.realpath(only_dir):
+            continue
+        sessions.append(session)
+    sessions.sort(key=lambda s: s["updated"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return sessions
+
+
+# --------------------------------------------------------------------------- #
+# formatting
+# --------------------------------------------------------------------------- #
+
+
+def pretty_path(path: str, width: int = 34) -> str:
+    if not path:
+        return "?"
+    home = str(Path.home())
+    shown = "~" + path[len(home):] if path.startswith(home) else path
+    if len(shown) <= width:
+        return shown
+    return "…" + shown[-(width - 1):]
+
+
+def pretty_age(when: datetime | None) -> str:
+    if not when:
+        return "?"
+    seconds = (datetime.now(timezone.utc) - when).total_seconds()
+    if seconds < 0:
+        return "now"
+    for limit, unit, suffix in ((60, 1, "s"), (3600, 60, "m"), (86400, 3600, "h"), (604800, 86400, "d")):
+        if seconds < limit:
+            return f"{int(seconds // unit)}{suffix}"
+    if seconds < 31536000:
+        return f"{int(seconds // 604800)}w"
+    return f"{int(seconds // 31536000)}y"
+
+
+def pretty_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}k"
+    return str(count)
+
+
+def truncate(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
+DIM = "\033[2m"
+GREEN = "\033[32m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def table_row(session: dict, color: bool) -> str:
+    """One aligned row: status, id, age, title, folder."""
+    dot = "●" if session["pid"] else "○"
+    title = truncate(session["title"] or session["preview"] or "(untitled)", 44)
+    folder = pretty_path(session["directory"], 34)
+    age = pretty_age(session["updated"]).rjust(4)
+    if color:
+        dot = f"{GREEN}{dot}{RESET}" if session["pid"] else f"{DIM}{dot}{RESET}"
+        age = f"{DIM}{age}{RESET}"
+        folder = f"{CYAN}{folder}{RESET}"
+    return f"{dot} {session['short']}  {age}  {title:<44}  {folder}"
+
+
+def print_table(sessions: list[dict], color: bool) -> None:
+    if not sessions:
+        print("No sessions found.", file=sys.stderr)
+        return
+    header = f"  {'ID':<8}  {'AGE':>4}  {'TITLE':<44}  FOLDER"
+    print(f"{DIM}{header}{RESET}" if color else header)
+    for session in sessions:
+        print(table_row(session, color))
+
+
+def print_preview(session: dict) -> None:
+    def field(label: str, value: str) -> None:
+        if value:
+            print(f"{DIM}{label:<9}{RESET}{value}")
+
+    print(f"{BOLD}{session['title'] or '(untitled)'}{RESET}")
+    print()
+    field("id", session["id"])
+    field("folder", session["directory"] or "?")
+    model = session["model"]
+    if session["model_name"] and session["model_name"] != model:
+        model = f"{model} ({session['model_name']})"
+    field("model", model)
+    field("branch", session["branch"])
+    field("started", session["started"].astimezone().strftime("%Y-%m-%d %H:%M") if session["started"] else "")
+    field("updated", session["updated"].astimezone().strftime("%Y-%m-%d %H:%M") if session["updated"] else "")
+    if session["pid"]:
+        field("status", f"running (pid {session['pid']})")
+    elif session["status"]:
+        field("status", session["status"])
+    if session["tokens"]:
+        field("tokens", f"{pretty_tokens(session['tokens'])} total · {pretty_tokens(session['cached_tokens'])} cached")
+    if session["children"]:
+        field("children", str(session["children"]))
+    if session["archived"]:
+        field("archived", "yes")
+
+    entries = read_tail_entries(Path(session["path"]), limit=6)
+    if entries:
+        print()
+        print(f"{DIM}── recent ──{RESET}")
+        for entry in entries:
+            who = "you" if entry["role"] == "user" else "vibe"
+            body = truncate(entry["text"], 400)
+            print(f"{DIM}{who}:{RESET} {body}")
+    elif session["preview"]:
+        print()
+        print(f"{DIM}── first message ──{RESET}")
+        print(session["preview"])
+
+
+# --------------------------------------------------------------------------- #
+# actions
+# --------------------------------------------------------------------------- #
+
+
+def resume(session: dict, *, change_dir: bool, print_only: bool, exec_shell: bool) -> int:
+    directory = session["directory"]
+    command = ["vibe", "--resume", session["id"]]
+
+    if print_only:
+        prefix = f"cd {directory} && " if change_dir and directory else ""
+        print(prefix + " ".join(command))
+        return 0
+
+    if change_dir and directory and os.path.isdir(directory):
+        os.chdir(directory)
+    elif change_dir and directory:
+        print(f"vibe-sessions: {directory} no longer exists, staying in {os.getcwd()}", file=sys.stderr)
+
+    if exec_shell:
+        os.execvp(command[0], command)
+    return subprocess.call(command)
+
+
+def pick(sessions: list[dict], args) -> int:
+    if not sessions:
+        print("No sessions found.", file=sys.stderr)
+        return 1
+
+    if not shutil.which("fzf"):
+        return pick_fallback(sessions, args)
+
+    script = str(Path(sys.argv[0]).resolve())
+    lines = []
+    for session in sessions:
+        row = table_row(session, color=True)
+        lines.append(f"{row}\t{session['id']}")
+
+    header = "enter: resume   ctrl-y: copy id   esc: cancel"
+    if args.only_folder:
+        header += "   (this folder only)"
+
+    fzf = [
+        "fzf",
+        "--ansi",
+        "--delimiter=\t",
+        "--with-nth=1",
+        "--height=90%",
+        "--layout=reverse",
+        "--border=rounded",
+        "--border-label= vibe sessions ",
+        "--border-label-pos=3",
+        "--info=inline-right",
+        f"--header={header}",
+        "--header-first",
+        "--pointer=▶",
+        "--marker= ",
+        "--preview", f"{sys.executable} {script} --preview {{2}}",
+        "--preview-window=right,60%,wrap,border-left",
+        "--bind=ctrl-y:execute-silent(printf %s {2} | (wl-copy 2>/dev/null || xclip -selection clipboard 2>/dev/null || xsel -b 2>/dev/null || true))+change-header(id copied)",
+    ]
+    if args.filter:
+        fzf += ["--filter", args.filter]
+
+    try:
+        result = subprocess.run(
+            fzf,
+            input="\n".join(lines),
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return pick_fallback(sessions, args)
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return 130
+
+    if args.filter:
+        # Non-interactive: fzf printed every match, not a single selection.
+        matches = [line for line in result.stdout.splitlines() if line.strip()]
+        if args.print:
+            chosen_id = matches[0].split("\t")[-1]
+            session = next((s for s in sessions if s["id"] == chosen_id), None)
+            if session is None:
+                return 1
+            return resume(session, change_dir=not args.no_cd, print_only=True, exec_shell=False)
+        for line in matches:
+            print(line.split("\t")[0])
+        return 0
+
+    chosen_id = result.stdout.rstrip("\n").split("\t")[-1]
+    session = next((s for s in sessions if s["id"] == chosen_id), None)
+    if session is None:
+        print(f"vibe-sessions: unknown session {chosen_id}", file=sys.stderr)
+        return 1
+    return resume(session, change_dir=not args.no_cd, print_only=args.print, exec_shell=args.exec)
+
+
+def pick_fallback(sessions: list[dict], args) -> int:
+    """Numbered menu for machines without fzf."""
+    print_table(sessions, color=sys.stdout.isatty())
+    print()
+    try:
+        choice = input("resume which session? [1-%d, empty to cancel] " % len(sessions)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 130
+    if not choice:
+        return 130
+    try:
+        session = sessions[int(choice) - 1]
+    except (ValueError, IndexError):
+        print("vibe-sessions: not a valid choice", file=sys.stderr)
+        return 1
+    return resume(session, change_dir=not args.no_cd, print_only=args.print, exec_shell=args.exec)
+
+
+# --------------------------------------------------------------------------- #
+# cli
+# --------------------------------------------------------------------------- #
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="vibe-sessions",
+        description="Browse and resume every Mistral Vibe session, across all folders.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  vibe-sessions                 fuzzy picker, Enter resumes\n"
+            "  vibe-sessions --list          plain table\n"
+            "  vibe-sessions --folder        only this folder, like Vibe's own picker\n"
+            "  vibe-sessions --json | jq     script it\n"
+        ),
+    )
+    parser.add_argument("-l", "--list", action="store_true", help="print a table instead of opening the picker")
+    parser.add_argument("-j", "--json", action="store_true", help="print JSON instead of opening the picker")
+    parser.add_argument("-a", "--all", action="store_true", help="include archived sessions")
+    parser.add_argument("-f", "--folder", dest="only_folder", action="store_true",
+                        help="only sessions started in the current directory")
+    parser.add_argument("-n", "--limit", type=int, default=0, help="show at most N sessions")
+    parser.add_argument("--filter", metavar="QUERY",
+                        help="non-interactive fuzzy match, prints the matching rows")
+    parser.add_argument("--preview", metavar="ID", help="print the detail view for one session and exit")
+    parser.add_argument("--no-cd", action="store_true", help="resume without changing to the session's folder")
+    parser.add_argument("--print", action="store_true", help="print the resume command instead of running it")
+    parser.add_argument("--exec", action="store_true", help="replace this process with vibe instead of running it as a child")
+    parser.add_argument("--no-color", action="store_true", help="disable colour in --list output")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.preview:
+        live = running_pids()
+        for path in session_dirs():
+            session = load_session(path, live, deep=True)
+            if session["id"] == args.preview or session["short"] == args.preview:
+                print_preview(session)
+                return 0
+        print(f"vibe-sessions: no session {args.preview}", file=sys.stderr)
+        return 1
+
+    sessions = collect(
+        include_archived=args.all,
+        only_dir=os.getcwd() if args.only_folder else None,
+    )
+    if args.limit > 0:
+        sessions = sessions[: args.limit]
+
+    if args.json:
+        payload = []
+        for session in sessions:
+            item = dict(session)
+            item["started"] = session["started"].isoformat() if session["started"] else None
+            item["updated"] = session["updated"].isoformat() if session["updated"] else None
+            payload.append(item)
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if args.list:
+        color = sys.stdout.isatty() and not args.no_color
+        print_table(sessions, color=color)
+        return 0
+
+    return pick(sessions, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
