@@ -338,6 +338,68 @@ class VibeSessionsTest(unittest.TestCase):
         self.assertLess(out.index("Old archived thing"), out.index("Scrape the catalogue"))
 
 
+
+    # -- content search ---------------------------------------------------- #
+
+    def write_journal(self, session_id: str, entries: list[tuple[str, str]]) -> None:
+        """Replace a session's journal with the given (role, text) entries."""
+        journal = self.home / "logs/session/unified" / session_id / "journal"
+        journal.mkdir(parents=True, exist_ok=True)
+        records = []
+        for index, (role, text) in enumerate(entries):
+            records.append({"type": "projection_delta", "payload": {"delta": [
+                {"op": "append_entry", "entry": {
+                    "id": f"e{index}", "role": role,
+                    "content": [{"type": "text", "text": text}], "createdAt": index}}]}})
+        (journal / "0000000000000001.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n")
+
+    def test_grep_finds_a_session_by_conversation_text(self) -> None:
+        self.write_journal(
+            "bbbbbbbb-1111-2222-3333-444444444444",
+            [("user", "we debugged the zzmarker threshold"), ("assistant", "yes")],
+        )
+        result = self.run_tool("--grep", "zzmarker", "--list", "--no-color")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Scrape the catalogue", result.stdout)
+        self.assertNotIn("Fix the tmux bar", result.stdout)
+
+    def test_grep_is_case_insensitive(self) -> None:
+        self.write_journal(
+            "bbbbbbbb-1111-2222-3333-444444444444",
+            [("user", "the ZZMARKER thing")],
+        )
+        result = self.run_tool("--grep", "zzmarker", "--list", "--no-color")
+        self.assertIn("Scrape the catalogue", result.stdout)
+
+    def test_grep_ignores_tool_output(self) -> None:
+        """A hit that only appears in tool output is not a conversation match."""
+        self.write_journal(
+            "bbbbbbbb-1111-2222-3333-444444444444",
+            [("tool", "zzmarker appears only in tool output")],
+        )
+        result = self.run_tool("--grep", "zzmarker", "--list", "--no-color")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no session mentions", result.stderr)
+
+    def test_grep_with_no_match(self) -> None:
+        result = self.run_tool("--grep", "zznotpresentanywhere", "--list", "--no-color")
+        self.assertEqual(result.returncode, 1)
+
+    def test_grep_snippet_appears_in_the_row(self) -> None:
+        self.write_journal(
+            "bbbbbbbb-1111-2222-3333-444444444444",
+            [("user", "context before zzmarker context after")],
+        )
+        out = self.run_tool("--grep", "zzmarker", "--raw").stdout
+        self.assertIn("zzmarker", out)
+        self.assertIn("context before", out)
+
+    def test_toggle_grep_flips_the_mode(self) -> None:
+        first = self.run_tool("--toggle-grep").stdout.strip()
+        second = self.run_tool("--toggle-grep").stdout.strip()
+        self.assertEqual({first, second}, {"titles", "transcripts"})
+
     # -- robustness -------------------------------------------------------- #
 
     def test_resume_without_vibe_reports_cleanly(self) -> None:

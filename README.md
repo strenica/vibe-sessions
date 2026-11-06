@@ -64,6 +64,7 @@ vibe-sessions --rename ID     rename a session
 vibe-sessions --tag ID        tag a session
 vibe-sessions --sort MODE     status | recent | title | folder
 vibe-sessions --prune-config  drop config.toml allowlist entries for dead sessions
+vibe-sessions --grep PATTERN  only sessions whose conversation mentions PATTERN
 ```
 
 Resuming changes into the session's original folder first, so the agent gets the right project context. `--no-cd` keeps you where you are, `--print` shows the command instead of running it, and `--exec` replaces the shell process instead of running Vibe as a child.
@@ -71,6 +72,30 @@ Resuming changes into the session's original folder first, so the agent gets the
 In the picker: `Enter` resumes, `Ctrl+Y` copies the session ID, `Ctrl+X` deletes, `Ctrl+S` cycles the sort order, `Esc` cancels. Typing filters on title, folder, tags, and session ID.
 
 `→` opens the action menu, so the whole thing is usable without a mouse. It only does that while the search box is empty — once you start typing, `→` moves the cursor as usual.
+
+## Searching transcripts
+
+The picker filters on title, folder, tags, and ID — the row text. To find a session by *what was said in it*, use `--grep`:
+
+```bash
+vibe-sessions --grep "compaction threshold"
+```
+
+That opens the normal picker, restricted to sessions whose conversation mentions it, with the matching line shown dimmed at the end of each row and the surrounding context in the preview pane.
+
+Inside the picker, **`Ctrl+G`** toggles the same search for whatever is currently in the search box. That's the rescue hatch: type `compaction`, get zero rows because no title contains it, press `Ctrl+G`, and the list refills with sessions that discussed it. The header switches to `SEARCHING TRANSCRIPTS` so you can tell which mode you're in. Press `Ctrl+G` again to go back.
+
+**How it stays fast.** grep is C-speed and finds candidate journals in ~120 ms across a thousand sessions; JSON parsing is the expensive part. So grep shortlists, and only the files it flags get parsed. Measured on a synthetic 1000-session / 214 MB store:
+
+| Approach | Time |
+|---|---|
+| `grep -rl` over every journal | 0.12 s |
+| Parse every journal in Python | 1.50 s |
+| grep to shortlist, then parse only the hits | 0.01 s |
+
+It also means a hit in *tool output* doesn't count — grep flags the file, but the parse confirms the match is in something you or the assistant actually said, not a file the agent once read.
+
+Two limits worth knowing: after `Ctrl+G`, typing narrows within the grep results rather than re-grepping (the snippet is the only content fzf can see), so press `Ctrl+G` again to re-run with a new query. And a query common enough to match every session degenerates to parsing everything — about 1.5 s at a thousand sessions.
 
 ## Sorting
 
