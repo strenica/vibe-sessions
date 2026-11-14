@@ -192,6 +192,8 @@ def sort_sessions(sessions: list[dict], mode: str) -> list[dict]:
         sessions.sort(key=lambda s: (s["title"] or s["preview"] or "").lower())
     elif mode == "folder":
         sessions.sort(key=lambda s: (s["directory"] or "").lower())
+    # Pinned sessions ride on top of whatever order was chosen.
+    sessions.sort(key=lambda s: 0 if s.get("pinned") else 1)
     return sessions
 
 
@@ -566,16 +568,18 @@ RESET = "\033[0m"
 def table_row(session: dict, color: bool) -> str:
     """One aligned row: status, id, age, title, folder, tags."""
     dot = "●" if session["pid"] else "○"
+    pin = "★" if session.get("pinned") else " "
     title = truncate(session["title"] or session["preview"] or "(untitled)", 44)
     folder = pretty_path(session["directory"], 34)
     age = pretty_age(session["updated"]).rjust(4)
     tags = " ".join(f"#{tag}" for tag in session.get("tags") or [])
     if color:
         dot = f"{GREEN}{dot}{RESET}" if session["pid"] else f"{DIM}{dot}{RESET}"
+        pin = f"{YELLOW}{pin}{RESET}" if session.get("pinned") else pin
         age = f"{DIM}{age}{RESET}"
         folder = f"{CYAN}{folder}{RESET}"
         tags = f"{YELLOW}{tags}{RESET}" if tags else ""
-    row = f"{dot} {session['short']}  {age}  {title:<44}  {folder}"
+    row = f"{dot} {pin} {session['short']}  {age}  {title:<44}  {folder}"
     return f"{row}  {tags}" if tags else row
 
 
@@ -610,7 +614,7 @@ def print_table(sessions: list[dict], color: bool) -> None:
     if not sessions:
         print("No sessions found.", file=sys.stderr)
         return
-    header = f"  {'ID':<8}  {'AGE':>4}  {'TITLE':<44}  FOLDER"
+    header = f"    {'ID':<8}  {'AGE':>4}  {'TITLE':<44}  FOLDER"
     print(f"{DIM}{header}{RESET}" if color else header)
     for session in sessions:
         print(table_row(session, color))
@@ -1050,6 +1054,32 @@ def rename_session(session: dict, title: str) -> None:
     set_title_override(session["id"], title)
 
 
+def set_pinned(session: dict, pinned: bool) -> None:
+    """Write Vibe's own pinned_at field.
+
+    Unlike the title, this survives: Vibe's metadata builder carries
+    previous.pinned_at over whenever it is not itself changing the pin, and
+    previous is read back from meta.json.
+    """
+    meta_path = Path(session["path"]) / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    if pinned:
+        meta["pinned_at"] = datetime.now(timezone.utc).isoformat()
+    else:
+        meta["pinned_at"] = None
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+
+def cmd_pin(session: dict, pinned: bool) -> int:
+    try:
+        set_pinned(session, pinned)
+    except (OSError, ValueError) as error:
+        message(f"Could not update the pin:\n\n{error}", "Pin failed")
+        return 1
+    print(f"{'pinned' if pinned else 'unpinned'} {session['short']}  {session['title']}")
+    return 0
+
+
 def cmd_rename(session: dict, title: str | None) -> int:
     if title is None:
         title = ask("New title:", "Rename session", session["title"] or "")
@@ -1090,12 +1120,14 @@ def cmd_menu(session: dict) -> int:
     tags = " ".join(f"#{tag}" for tag in session.get("tags") or []) or "(none)"
     text = f"{title}\n{session['directory'] or '?'}\nTags: {tags}"
 
+    pinned = bool(session.get("pinned"))
     choice = menu(
         text,
         "Session",
         [
             ("rename", "Rename this session"),
             ("tag", "Tag this session"),
+            ("unpin" if pinned else "pin", "Unpin this session" if pinned else "Pin to the top"),
             ("delete", "Delete this session"),
             ("cancel", "Cancel"),
         ],
@@ -1106,6 +1138,10 @@ def cmd_menu(session: dict) -> int:
         return cmd_rename(session, None)
     if choice == "tag":
         return cmd_tag(session, None)
+    if choice == "pin":
+        return cmd_pin(session, True)
+    if choice == "unpin":
+        return cmd_pin(session, False)
     if choice == "delete":
         return cmd_delete(session, force=False)
     return 130
@@ -1274,6 +1310,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="open the action menu for one session (rename, tag, delete)")
     parser.add_argument("--rename", metavar="ID", help="rename a session")
     parser.add_argument("--title", metavar="TEXT", help="the new title for --rename")
+    parser.add_argument("--pin", metavar="ID", help="pin a session to the top of the list")
+    parser.add_argument("--unpin", metavar="ID", help="unpin a session")
     parser.add_argument("--tag", metavar="ID", help="set the tags for a session")
     parser.add_argument("--tags", metavar="LIST", help="comma separated tags for --tag")
     parser.add_argument("--grep", metavar="PATTERN",
@@ -1345,6 +1383,8 @@ def main(argv: list[str] | None = None) -> int:
         (args.menu, cmd_menu),
         (args.rename, lambda s: cmd_rename(s, args.title)),
         (args.tag, lambda s: cmd_tag(s, args.tags)),
+        (args.pin, lambda s: cmd_pin(s, True)),
+        (args.unpin, lambda s: cmd_pin(s, False)),
     ):
         if flag:
             session = find_session(flag)

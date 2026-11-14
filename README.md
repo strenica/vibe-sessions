@@ -7,13 +7,13 @@ Vibe's own `/resume` picker is scoped to the folder you launched it from — ses
 ```
 ┌ vibe sessions ─────────────────────────────────────────────────────────────┐
 │ enter resume · ctrl-y copy id · ctrl-x delete · → / right-click menu · ctrl-s sort │
-│ ● 311b1b43    6m  Projects directory listing      ~/Desktop/projects  #work  │
-│ ○ 3984d2b0   12m  Mistral Vibe CLI architecture   /tmp/test                  │
-│ ○ 7f21c9aa    3h  Fix the tmux status bar         ~/dotfiles          #dot   │
+│ ● ★ 311b1b43    6m  Projects directory listing    ~/Desktop/projects  #work  │
+│ ○   3984d2b0   12m  Mistral Vibe CLI architecture /tmp/test                  │
+│ ○   7f21c9aa    3h  Fix the tmux status bar       ~/dotfiles          #dot   │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`●` marks a session a live process currently holds open. Tags are shown in yellow.
+`●` marks a session a live process currently holds open, `★` a pinned one. Tags are shown in yellow.
 
 ## Install
 
@@ -65,6 +65,7 @@ vibe-sessions --tag ID        tag a session
 vibe-sessions --sort MODE     status | recent | title | folder
 vibe-sessions --prune-config  drop config.toml allowlist entries for dead sessions
 vibe-sessions --grep PATTERN  only sessions whose conversation mentions PATTERN
+vibe-sessions --pin ID        pin a session to the top
 ```
 
 Resuming changes into the session's original folder first, so the agent gets the right project context. `--no-cd` keeps you where you are, `--print` shows the command instead of running it, and `--exec` replaces the shell process instead of running Vibe as a child.
@@ -99,7 +100,7 @@ Two limits worth knowing: after `Ctrl+G`, typing narrows within the grep results
 
 ## Sorting
 
-The list is sorted by `status` by default: sessions a live process holds open come first, then most recently used. `Ctrl+S` cycles through the modes and remembers your choice; `--sort` sets it directly.
+The list is sorted by `status` by default: sessions a live process holds open come first, then most recently used. `Ctrl+S` cycles through the modes and remembers your choice; `--sort` sets it directly. Pinned sessions always sort above the rest, whatever the mode.
 
 | Mode | Order |
 |---|---|
@@ -138,6 +139,12 @@ Writes `title` and `title_source = "manual"` into `meta.json` — the same field
 The copy is not redundant. Vibe builds its metadata with `title=session.title`, taken from the *in-memory* session, and on resume it seeds that from the journal envelope rather than from `meta.json`. So an external rename is reset the next time the session is used. The sidecar keeps your name visible in this picker; a manual title in `meta.json` — set by Vibe's own `/rename` — always wins over it.
 
 The practical consequence: **a rename made here sticks in this tool, but not in Vibe.** If you want the name to hold everywhere, run `/rename` inside the session. Renaming a session a live process holds open is refused outright.
+
+### Pin
+
+`Pin to the top` in the action menu, or `--pin <id>` / `--unpin <id>`. Pinned sessions sort above everything else in every sort mode and carry a `★`.
+
+This writes Vibe's own `pinned_at` field in `meta.json`, so it is not a private convention — Vibe's picker shows the same pin. It also **survives**, unlike a rename: Vibe's metadata builder carries `previous.pinned_at` over whenever it is not itself changing the pin, and `previous` is read back from `meta.json`.
 
 ### Tag
 

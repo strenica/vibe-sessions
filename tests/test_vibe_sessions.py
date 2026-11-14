@@ -375,6 +375,56 @@ class VibeSessionsTest(unittest.TestCase):
 
 
 
+
+    # -- pin --------------------------------------------------------------- #
+
+    def test_pin_writes_vibes_own_field(self) -> None:
+        result = self.run_tool("--pin", "bbbbbbbb")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads(
+            (self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json").read_text()
+        )
+        self.assertIsNotNone(meta.get("pinned_at"))
+
+    def test_pinned_sessions_sort_to_the_top(self) -> None:
+        before = self.run_tool("--list", "--no-color").stdout
+        self.assertLess(before.index("Fix the tmux bar"), before.index("Scrape the catalogue"))
+
+        self.run_tool("--pin", "bbbbbbbb")
+        after = self.run_tool("--list", "--no-color").stdout
+        self.assertLess(after.index("Scrape the catalogue"), after.index("Fix the tmux bar"))
+        self.assertIn("★", after)
+
+    def test_pinned_stays_on_top_in_every_sort_mode(self) -> None:
+        self.run_tool("--pin", "bbbbbbbb")
+        for mode in ("status", "recent", "title", "folder"):
+            out = self.run_tool("--list", "--all", "--sort", mode, "--no-color").stdout
+            self.assertLess(
+                out.index("Scrape the catalogue"), out.index("Fix the tmux bar"),
+                f"pin lost its place under --sort {mode}",
+            )
+
+    def test_unpin_clears_the_field(self) -> None:
+        self.run_tool("--pin", "bbbbbbbb")
+        self.run_tool("--unpin", "bbbbbbbb")
+        meta = json.loads(
+            (self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json").read_text()
+        )
+        self.assertIsNone(meta.get("pinned_at"))
+        self.assertNotIn("★", self.run_tool("--list", "--no-color").stdout)
+
+    def test_pin_survives_a_vibe_metadata_rewrite(self) -> None:
+        """Vibe carries previous.pinned_at over; simulate that rewrite."""
+        self.run_tool("--pin", "bbbbbbbb")
+        meta_path = self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json"
+        meta = json.loads(meta_path.read_text())
+        pinned = meta["pinned_at"]
+        meta["title"] = "Rewritten"
+        meta["title_source"] = "auto"
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+        self.assertEqual(json.loads(meta_path.read_text())["pinned_at"], pinned)
+        self.assertIn("★", self.run_tool("--list", "--no-color").stdout)
+
     # -- content search ---------------------------------------------------- #
 
     def write_journal(self, session_id: str, entries: list[tuple[str, str]]) -> None:
