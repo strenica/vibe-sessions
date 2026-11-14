@@ -140,6 +140,20 @@ def set_session_tags(session_id: str, tags: list[str]) -> None:
     save_state()
 
 
+def title_override(session_id: str) -> str:
+    return (load_state().get("titles") or {}).get(session_id) or ""
+
+
+def set_title_override(session_id: str, title: str) -> None:
+    state = load_state()
+    titles = state.setdefault("titles", {})
+    if title:
+        titles[session_id] = title
+    else:
+        titles.pop(session_id, None)
+    save_state()
+
+
 def current_sort() -> str:
     mode = load_state().get("sort") or DEFAULT_SORT
     return mode if mode in SORT_MODES else DEFAULT_SORT
@@ -428,11 +442,23 @@ def load_session(session_dir: Path, live: dict[str, int], deep: bool = False) ->
         or ""
     )
 
+    title = meta.get("title") or ""
+    title_source = meta.get("title_source") or ""
+    # Vibe persists the title from its in-memory session on every turn, so a
+    # rename made here is reset to "auto" the next time the session is used.
+    # The sidecar keeps our name visible in this tool; a manual title in
+    # meta.json (set by Vibe's own /rename) always wins.
+    if title_source != "manual":
+        override = title_override(session_id)
+        if override:
+            title = override
+            title_source = "manual"
+
     session = {
         "id": session_id,
         "short": session_id[:8],
-        "title": meta.get("title") or "",
-        "title_source": meta.get("title_source") or "",
+        "title": title,
+        "title_source": title_source,
         "directory": directory,
         "model": config.get("active_model") or "",
         "model_name": config.get("model_name") or "",
@@ -784,6 +810,8 @@ def delete_session(session: dict) -> None:
             except OSError:
                 continue
 
+    set_title_override(session["id"], "")
+
     # Per-session plugin state, keyed by session id.
     plugin_data = session_root() / "plugins" / "data" / session["id"]
     if plugin_data.is_dir():
@@ -1017,6 +1045,9 @@ def rename_session(session: dict, title: str) -> None:
     meta["title"] = title
     meta["title_source"] = "manual"
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+    # meta.json alone does not survive: Vibe rewrites it from its in-memory
+    # session on the next turn, so keep our own copy too.
+    set_title_override(session["id"], title)
 
 
 def cmd_rename(session: dict, title: str | None) -> int:

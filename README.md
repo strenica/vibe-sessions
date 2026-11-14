@@ -129,11 +129,15 @@ The list is sorted by `status` by default: sessions a live process holds open co
 
 ### Rename
 
-Writes `title` and `title_source = "manual"` into the session's `meta.json` — the same field Vibe's own `/rename` sets, so Vibe shows the new name too. Refused while the session is open in a running process, since Vibe would overwrite it.
-
 ```bash
 vibe-sessions --rename <id> --title "New name"
 ```
+
+Writes `title` and `title_source = "manual"` into `meta.json` — the same fields Vibe's own `/rename` sets — **and** keeps a copy in the sidecar state file.
+
+The copy is not redundant. Vibe builds its metadata with `title=session.title`, taken from the *in-memory* session, and on resume it seeds that from the journal envelope rather than from `meta.json`. So an external rename is reset the next time the session is used. The sidecar keeps your name visible in this picker; a manual title in `meta.json` — set by Vibe's own `/rename` — always wins over it.
+
+The practical consequence: **a rename made here sticks in this tool, but not in Vibe.** If you want the name to hold everywhere, run `/rename` inside the session. Renaming a session a live process holds open is refused outright.
 
 ### Tag
 

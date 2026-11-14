@@ -284,6 +284,42 @@ class VibeSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Scrape the catalogue", self.run_tool("--list", "--no-color").stdout)
 
+
+    def test_rename_survives_vibe_resetting_meta_json(self) -> None:
+        """Vibe rewrites the title from memory; our sidecar must keep the name."""
+        self.run_tool("--rename", "bbbbbbbb", "--title", "My name")
+
+        # Simulate Vibe persisting its in-memory (auto) title over ours.
+        meta_path = self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["title"] = "Scrape the catalogue"
+        meta["title_source"] = "auto"
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+        out = self.run_tool("--list", "--no-color").stdout
+        self.assertIn("My name", out)
+        self.assertNotIn("Scrape the catalogue", out)
+
+    def test_a_manual_title_in_meta_json_wins_over_the_sidecar(self) -> None:
+        """A rename done inside Vibe (/rename) must take precedence."""
+        self.run_tool("--rename", "bbbbbbbb", "--title", "Ours")
+
+        meta_path = self.home / "logs/session/unified/bbbbbbbb-1111-2222-3333-444444444444/meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["title"] = "Theirs"
+        meta["title_source"] = "manual"
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+
+        out = self.run_tool("--list", "--no-color").stdout
+        self.assertIn("Theirs", out)
+        self.assertNotIn("Ours", out)
+
+    def test_delete_clears_the_title_override(self) -> None:
+        self.run_tool("--rename", "bbbbbbbb", "--title", "Doomed")
+        self.run_tool("--delete", "bbbbbbbb", "--force")
+        state = json.loads((self.home / "state/vibe-sessions/state.json").read_text())
+        self.assertNotIn("bbbbbbbb-1111-2222-3333-444444444444", state.get("titles") or {})
+
     # -- tags ------------------------------------------------------------- #
 
     def test_tag_roundtrip(self) -> None:
